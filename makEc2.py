@@ -6,6 +6,8 @@ import time
 import boto3
 import pprint
 import socket
+import os
+from subprocess import call
 from botocore.exceptions import ClientError
 from sys import exit
 from datetime import tzinfo, timedelta, datetime
@@ -77,9 +79,10 @@ class AWSElassticCompute:
         res = self.ec2.create_key_pair(KeyName=name,DryRun=False)
         self.log.debug('Create new keypair:',res)
         self.log.debug(res)
-        kp = open("%s.pem,"%(res['KeyName']),'w')
+        kp = open("%s.pem"%(res['KeyName']),'w')
         kp.write(res['KeyMaterial'])
         kp.close
+        os.chmod("%s.pem"%(res['KeyName']),384)
         self.key_pair = res['KeyName']
         return self.key_pair
 
@@ -89,14 +92,24 @@ class AWSElassticCompute:
         """
         Make a generic security group
         """
-
+        try:
+            response = self.ec2.describe_vpcs()
+            vpc_id = response.get('Vpcs', [{}])[0].get('VpcId', '')
+        except:
+            try:
+              vpc_response = self.ec2.create_default_vpc(DryRun=False)
+              self.log.debug(vpc_response)
+              response = self.ec2.describe_vpcs()
+              vpc_id = response.get('Vpcs', [{}])[0].get('VpcId', '')
+            except:
+              self.log.error("VPC Already Exists")
         try:
             today = datetime.now()
             name = "%s-%s"%(self.args.hostname,today.strftime("%Y-%m-%d_%H-%M-%S"))
             response = self.ec2.create_security_group(
-                Description="Auto Generated SecurityGroup '%s'"%(self.args.hostname),
+                Description="Auto Generated SecurityGroup",
                 GroupName="%s-sg"%(name),
-                DryRun=False
+                VpcId=vpc_id
             )
             security_group_id = response['GroupId']
             print('Security Group Created %s.' % (security_group_id))
@@ -117,10 +130,12 @@ class AWSElassticCompute:
         return self.security_group_id
 
     def makeAnsibleFiles(self,ip):
-      s = open('.host','w')
+      s = open('.hosts','w')
       s.write("[webservers]\n# Add hosts here\n%s\n\n\n[webservers:vars]\n# Local variables for Ansible playbooks\nansible_user=ubuntu\ngithub_user=analogrithems\napp_name=reactiveops_coder_test\n"%(ip))
       s.close()
       print("Run: ansible-playbook deploy.yml --key-file %s.pem"%(self.key_pair))
+      call(["ansible-playbook", "deploy.yml", "--key-file=%s.pem"%(self.key_pair)])
+
     def launchEC2(self):
         if not self.key_pair:
             kp = self.makeKeyPair()
@@ -155,15 +170,17 @@ class AWSElassticCompute:
               ]
           )
         except:
-            vpc_response = self.ec2.create_default_vpc(DryRun=False)
-            logger.debug(vpc_response)
+            try:
+              vpc_response = self.ec2.create_default_vpc(DryRun=False)
+              self.log.debug(vpc_response)
+            except:
+              self.log.error("VPC Already Exists")
             res = self.ec2.run_instances(
                 ImageId=self.args.ami,
                 KeyName=self.key_pair,
                 InstanceType=self.args.instance_type,
                 MinCount=self.args.count,
                 MaxCount=self.args.count,
-                SecurityGroupIds=[self.security_group_id],
                 BlockDeviceMappings=[{
                     "DeviceName": "/dev/sda1",
                     "Ebs": {
@@ -199,7 +216,7 @@ class AWSElassticCompute:
 
                 logging.info( '[%s] Waiting for instance to become available, currently %s' % ( self.args.hostname, instance.state['Name'] ) )
                 if instance.state['Name'] == 'running':
-                    logger.info(instance)
+                    self.log.info(instance)
                     waiting = False
                 else:
                     time.sleep(30)
